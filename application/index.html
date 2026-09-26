@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Aplicación Web de Alta Demanda</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      text-align: center;
+      padding: 3rem 1rem;
+      line-height: 1.6;
+    }
+    h1 { color: #ff9900; }
+    .card {
+      max-width: 560px;
+      margin: 2rem auto;
+      background: #1e293b;
+      border-radius: 12px;
+      padding: 1.5rem;
+    }
+    .muted { color: #94a3b8; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <h1>✅ Aplicación Web de Alta Demanda</h1>
+  <div class="card">
+    <p>Página de <strong>ejemplo</strong> del Reto 2.</p>
+    <p>En el reto real, esta página la sirve <strong>nginx</strong> en cada instancia EC2,
+       detrás de un <strong>Application Load Balancer</strong>.</p>
+    <p class="muted">
+      Consulta <code>user-data.sh</code>: genera dinámicamente una versión que muestra
+      el ID y la Availability Zone de la instancia que responde, para verificar el balanceo.
+    </p>
+  </div>
+  <p class="muted">Puedes reemplazar esta página por tu propia aplicación.</p>
+</body>
+</html>
