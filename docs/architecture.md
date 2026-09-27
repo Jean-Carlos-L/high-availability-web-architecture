@@ -1,84 +1,116 @@
 # Arquitectura — Aplicación Web de Alta Demanda
 
-> Plantilla para que documentes **tu** diseño. Complétala a medida que construyes tu stack de CDK.
+> Infraestructura definida con **AWS CDK v2 (TypeScript)** en [`cdk/lib/web-app-stack.ts`](../cdk/lib/web-app-stack.ts).
 
 ---
 
 ## 1. Diagrama de arquitectura
 
-_Este es un diagrama de referencia. Reemplázalo por el tuyo a medida que diseñas tu stack._
-
 ```mermaid
 flowchart TB
-    User([Usuario / Internet])
-    User -->|HTTP/HTTPS 80/443| ALB
+    U([Usuario / Internet])
+    IGW["Internet Gateway"]
+    ALB["Application Load Balancer<br/>público · HTTP :80"]
+    ASG["Auto Scaling Group<br/>min 2 · max 6 · EC2 t3.micro + nginx"]
+    EC2A["EC2 en AZ-a<br/>EBS gp3 cifrado"]
+    EC2B["EC2 en AZ-b<br/>EBS gp3 cifrado"]
+    SSM["Systems Manager<br/>(sin puerto 22)"]
 
-    subgraph VPC["VPC (2 Availability Zones)"]
-        ALB["Application Load Balancer<br/>(público)"]
+    U -->|HTTP :80| IGW
+    IGW --> ALB
+    ALB -->|HTTP :80| ASG
+    ASG --> EC2A
+    ASG --> EC2B
+    SSM -.-> EC2A
+    SSM -.-> EC2B
+```
 
-        subgraph AZa["Subnet pública · AZ-a"]
-            EC2a["EC2 + nginx<br/>+ volumen EBS"]
-        end
-        subgraph AZb["Subnet pública · AZ-b"]
-            EC2b["EC2 + nginx<br/>+ volumen EBS"]
-        end
+**Resumen:** `Usuario → Internet Gateway → ALB (subnet pública) → EC2 + Nginx (Auto Scaling Group)`.
+Las instancias viven en **subnets públicas**, pero **no son accesibles desde internet**: su Security Group solo admite tráfico del ALB.
 
-        ALB --> EC2a
-        ALB --> EC2b
-    end
+---
 
-    ASG["Auto Scaling Group<br/>(min 2 · max 6)"]
-    ASG -.gestiona.-> EC2a
-    ASG -.gestiona.-> EC2b
+## 2. Stack tecnológico
+
+| Componente     | Tecnología                  | Configuración                                |
+| -------------- | --------------------------- | -------------------------------------------- |
+| IaC            | **AWS CDK v2** + TypeScript | Stack `WebAppStack`                          |
+| Red            | **VPC**                     | 2 AZs · 2 subnets públicas · sin NAT Gateway |
+| Entrada        | **Internet Gateway + ALB**  | Listener `:80`                               |
+| Cómputo        | **Amazon EC2**              | `t3.micro` · Amazon Linux 2023 · Nginx       |
+| Escalado       | **Auto Scaling Group**      | min 2 · max 6 · escala con CPU > 60 %        |
+| Almacenamiento | **Amazon EBS**              | `gp3` 20 GiB cifrado                         |
+| Seguridad      | **IAM + Security Groups**   | Rol de mínimo privilegio · sin SSH           |
+| Monitoreo      | **CloudWatch**              | Alarma de CPU > 60 %                         |
+| Administración | **Systems Manager**         | Session Manager                              |
+
+---
+
+## 3. Por qué cada componente
+
+| Componente             | Decisión                                                                         | Motivo                                                                                                                              |
+| ---------------------- | -------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| **VPC / Subredes**     | 2 AZs, subnets públicas, `natGateways: 0`                                        | Una AZ puede caerse sin dejar el sitio sin servicio. Sin NAT Gateway se ahorra el costo mensual.                                    |
+| **Security Groups**    | 2 SGs encadenados: `0.0.0.0/0:80` al ALB y `tcp:80` **solo desde el SG del ALB** | Solo el ALB queda expuesto; las EC2 no aceptan tráfico directo. Referenciar el SG en vez de un CIDR evita errores de configuración. |
+| **IAM / SSM**          | Rol con una sola policy (`AmazonSSMManagedInstanceCore`) y **puerto 22 cerrado** | Mínimo privilegio y acceso remoto por Session Manager (HTTPS), sin SSH ni Key Pairs que exponer.                                    |
+| **Auto Scaling Group** | min 2 · max 6 · target tracking CPU > 60 % · cooldown 60 s                       | Mantiene 2 instancias siempre activas y agrega capacidad sola cuando llega el pico de tráfico.                                      |
+| **ALB**                | Health check `/` cada 10 s · `deregistrationDelay: 15 s`                         | Detecta instancias caídas rápido y drena el tráfico en 15 s para que el usuario no vea errores al escalar.                          |
+| **EBS**                | `gp3` 20 GiB cifrado                                                             | Disco SSD cifrado, barato y suficiente para la app.                                                                                 |
+
+---
+
+## 4. Preguntas
+
+**¿Cómo se absorbe un pico de tráfico 10x?**
+De forma automática: al subir la CPU por encima del 60 %, el ASG lanza instancias nuevas hasta el máximo permitido. El ALB las detecta en ~20 s y reparte el tráfico entre ellas. Cuando baja la demanda, las instancias sobrantes se terminan y se drenan en 15 s.
+
+**¿Qué pasa si falla una instancia EC2?**
+El health check del ALB la marca como no sana en ~20 s, deja de enviarle tráfico y el ASG lanza otra para mantener las 2 instancias. El usuario no percibe caída.
+
+**¿Por qué no se abrió el puerto 22?**
+Para no exponer un puerto de administración a internet. El acceso se hace con **Session Manager**, que viaja por HTTPS, no deja sesiones de SSH abiertas y queda auditado en CloudTrail.
+
+**¿Qué pasa si falla una AZ completa?**
+El ALB tiene nodo en las 2 AZs, así que sigue atendiendo con la AZ sana. El ASG redistribuye las instancias hacia esa AZ.
+
+---
+
+## 5. Comandos útiles
+
+Todos se ejecutan dentro de `cdk/`:
+
+```bash
+npm install                # Instalar dependencias
+npm run build              # Validar tipos (tsc)
+npm run synth              # Generar la plantilla CloudFormation
+npm run diff               # Ver qué cambiaría en la cuenta (antes de desplegar)
+npm run deploy             # Desplegar la infraestructura
+npm test                   # Ejecutar pruebas
+
+# Ver la URL del ALB
+aws cloudformation describe-stacks --stack-name WebAppStack \
+  --query "Stacks[0].Outputs[?OutputKey=='LoadBalancerDNS'].OutputValue" --output text
+
+# Probar la aplicación
+curl -I http://<ALB-DNS>                 # Esperar respuesta 200
+curl -s http://<ALB-DNS> | grep Instancia   # Ver qué instancia responde
+
+# Entrar a una instancia sin SSH
+aws ssm start-session --target <instance-id>
+
+# Limpiar todo
+npx cdk destroy
 ```
 
 ---
 
-## 2. Componentes
+## 6. Conclusión
 
-| Componente | Servicio AWS | Responsabilidad | Decisiones de diseño |
-|---|---|---|---|
-| Red | VPC | _¿Cuántas AZs? ¿Subnets públicas/privadas?_ | |
-| Cómputo | EC2 | _¿Tipo de instancia? ¿AMI? ¿user-data?_ | |
-| Escalado | Auto Scaling Group | _min/max, ¿health check por ELB?_ | |
-| Balanceo | ALB | _¿Listener? ¿Target group? ¿Health check?_ | |
-| Almacenamiento | EBS | _¿Tamaño? ¿removalPolicy?_ | |
-| Permisos | IAM | _¿Qué necesita el rol de la instancia?_ | |
-| Seguridad | Security Groups | _¿Quién habla con quién?_ | |
+- **Alta disponibilidad:** 2 AZs y mínimo 2 instancias: una AZ o una instancia pueden caerse sin detener el servicio.
+- **Seguridad:** un solo punto de exposición (el ALB en `:80`), sin SSH y con permisos mínimos.
+- **Escalabilidad:** el ASG agrega y quita instancias solo, según el uso de CPU.
+- **Costos:** instancias pequeñas, sin NAT Gateway y con un stack que se destruye con un comando.
 
 ---
 
-## 3. Seguridad y acceso
-
-- ¿Cómo garantizas que **solo el ALB** reciba tráfico de internet en 80/443?
-- ¿Cómo permites que las EC2 reciban tráfico **solo desde el ALB** (SG referenciando SG)?
-- ¿Qué permisos mínimos otorgaste al rol IAM de las instancias?
-
-_Completa aquí tu razonamiento._
-
----
-
-## 4. Alta disponibilidad y tolerancia a fallos
-
-- ¿Cómo sobrevive la caída de una AZ?
-- ¿Qué pasa cuando terminas una instancia manualmente? ¿Quién la reemplaza?
-- ¿Cómo detecta el ALB que una instancia está sana? (health check path)
-
----
-
-## 5. Flujo de despliegue
-
-- Lenguaje elegido para CDK: `______`
-- Comando(s) para desplegar: `cdk deploy`
-- Comando(s) para destruir: `cdk destroy`
-
----
-
-## 6. Boss Fight (si lo abordaste)
-
-- ¿Qué **política de escalado** configuraste? (target tracking por CPU > 60%)
-- ¿Cómo verificaste que el ASG **escala solo** sin intervención manual?
-- (Opcional) ¿Qué **CloudWatch Alarms** añadiste?
-- ¿Cómo confirmaste que el **ALB no es el cuello de botella**?
-
-_Completa aquí tu solución._
+_Challenge 2 — Aplicación Web de Alta Demanda · AWS Cloud Practitioner Challenge · AWS SBG Univalle_
